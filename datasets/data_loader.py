@@ -15,6 +15,13 @@ def return_dataset(dataset_name, args, train_model=True):
             return Collective(args, 'train')
         else:
             return Collective(args, 'test', print_cls_idx=True)
+    
+    elif dataset_name == 'rtmpose':
+        from datasets.rtmpose import Rtmpose
+        if train_model:
+            return Rtmpose(args, 'train')
+        else:
+            return Rtmpose(args, 'test', print_cls_idx=True)
         
     else:
         print('Please check the dataset name!')

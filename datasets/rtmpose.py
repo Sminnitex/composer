@@ -1,18 +1,25 @@
+from torch.utils.data import Dataset
+import torch, os, glob
+from collections import defaultdict
 import os
-import pdb
-import sys
-from pathlib import Path 
+from functools import partial
+from openxlab.model import download  # noqa
+from mmpose.apis import MMPoseInferencer  # noqa
 import pickle
 import numpy as np
-import random
 import copy
-import json
-import glob
-from collections import defaultdict
+import argparse, random
+from PIL import Image
 
-import torch
-from torch.utils.data import Dataset
 
+project_path = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+mmpose_path = project_path.split('/projects', 1)[0]
+
+models = [
+    'rtmpose | body', 'rtmo | body', 'rtmpose | face', 'dwpose | wholebody',
+    'rtmw | wholebody'
+]
+cached_model = {model: None for model in models}
 
 COCO_KEYPOINT_INDEXES = {
     'nose': 0,
@@ -102,79 +109,109 @@ def oks_one_keypoint_compute(keypoint, keypoint_prev, box, box_prev, require_nor
     return oks
 
 
-class Collective(Dataset):
+
+
+
+class Rtmpose(Dataset):
+    
     def __init__(self, args, split='train', print_cls_idx=True):
         self.args = args
         self.split = split
+          
         
-        self.dataset_splits = {
-            'train': [1, 2, 3, 4, 12, 13, 14, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 
-                      30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44],
-            'test': [5,6,7,8,9,10,11,15,16,25,28,29]
-        }
+        if args.olympic_split:
+            self.dataset_splits = {
+                'train': [1, 2, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 
+                          41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54],
+                'test': [0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 
+                         19, 20, 21, 22, 23, 24, 25, 26, 27]
+            }
+        else:
+            self.dataset_splits = {
+                'train': [1, 3, 6, 7, 10, 13, 15, 16, 18, 22, 23, 31, 32, 36, 38, 39,
+                          40, 41, 42, 48, 50, 52, 53, 54, 0, 2, 8, 12, 17, 19, 24, 26,
+                          27, 28, 30, 33, 46, 49, 51],
+                'test': [4, 5, 9, 11, 14, 20, 21, 25, 29, 34, 35, 37, 43, 44, 45, 47]
+            }
         
         
-        # activities
         self.idx2class = {
-            0: 'Walking',
-            1: 'Waiting',
-            2: 'Queueing',
-            3: 'Talking'
+            0: {'r_set', 'r-set'},
+            1: {'l_set', 'l-set'},
+            2: {'r_spike', 'r-spike'},
+            3: {'l_spike', 'l-spike'},
+            4: {'r_pass', 'r-pass'},
+            5: {'l_pass', 'l-pass'},
+            6: {'r_winpoint', 'r-winpoint'},
+            7: {'l_winpoint', 'l-winpoint'}
         }
         self.class2idx = dict()
         if print_cls_idx:
             print('class index:') 
         for k in self.idx2class:
-            self.class2idx[self.idx2class[k]] = k
-            if print_cls_idx:
-                print('{}: {}'.format(self.idx2class[k], k))
-        self.group_activities_weights = torch.FloatTensor([0.5, 3.0, 2.0, 1.0]).cuda()
-        # ACTIVITIES = ['Walking', 'Waiting', 'Queueing', 'Talking']    
+            for v in self.idx2class[k]:
+                self.class2idx[v] = k
+                if print_cls_idx:
+                    print('{}: {}'.format(v, k))
+        self.group_activities_weights = torch.FloatTensor([1., 1., 1., 1., 1., 1., 1., 1.]).cuda()
+        
                     
         self.person_actions_all = pickle.load(
-            open(os.path.join(self.args.dataset_dir, self.args.person_action_label_file_name), "rb"))
-        self.person_actions_weights = torch.FloatTensor([0.5, 1.0, 4.0, 3.0, 2.0]).cuda()
-        # ACTIONS = ['NA', 'Walking', 'Waiting', 'Queueing', 'Talking']
+                open(os.path.join(self.args.dataset_dir, self.args.person_action_label_file_name), "rb"))
+        self.person_actions_weights = torch.FloatTensor([0.2, 1., 1., 2., 3., 1., 4., 4., 0.2, 1.]).cuda()
+        # ACTIONS = ['NA', 'blocking', 'digging', 'falling', 'jumping', 'moving', 'setting', 'spiking', 'standing', 'waiting']
+        # { 'NA': 0,
+        # 'blocking': 1, 
+        # 'digging': 2, 
+        #  'falling': 3, 
+        #  'jumping': 4,
+        #  'moving':5 , 
+        #  'setting': 6, 
+        #  'spiking': 7, 
+        #  'standing': 8,
+        #  'waiting': 9}
         
-        self.FRAMES_SIZE={1: (480, 720), 2: (480, 720), 3: (480, 720), 4: (480, 720), 5: (480, 720), 6: (480, 720), 7: (480, 720), 8: (480, 720), 9: (480, 720), 10: (480, 720), 
-             11: (480, 720), 12: (480, 720), 13: (480, 720), 14: (480, 720), 15: (450, 800), 16: (480, 720), 17: (480, 720), 18: (480, 720), 19: (480, 720), 20: (450, 800), 
-             21: (450, 800), 22: (450, 800), 23: (450, 800), 24: (450, 800), 25: (480, 720), 26: (480, 720), 27: (480, 720), 28: (480, 720), 29: (480, 720), 30: (480, 720), 
-             31: (480, 720), 32: (480, 720), 33: (480, 720), 34: (480, 720), 35: (480, 720), 36: (480, 720), 37: (480, 720), 38: (480, 720), 39: (480, 720), 40: (480, 720), 
-             41: (480, 720), 42: (480, 720), 43: (480, 720), 44: (480, 720)}
+        
         
         self.annotations = []
         self.annotations_each_person = []
         self.clip_joints_paths = []
         self.clips = []
-        
-        self.annotations_CAD = pickle.load(
-            open(os.path.join(self.args.dataset_dir, 'annotations.pkl'), "rb"))
-        
-        
+        if args.ball_trajectory_use:
+            self.clip_ball_paths = []
         self.prepare(args.dataset_dir)
+        self.collect_standardization_stats()
             
         if self.args.horizontal_flip_augment and self.split == 'train':
+            self.classidx_horizontal_flip_augment = {
+                0: 1,
+                1: 0,
+                2: 3,
+                3: 2,
+                4: 5,
+                5: 4,
+                6: 7,
+                7: 6
+            }
             if self.args.horizontal_flip_augment_purturb:
                 self.horizontal_flip_augment_joint_randomness = dict()
                 
         if self.args.horizontal_move_augment and self.split == 'train':
-            if self.args.horizontal_move_augment_purturb:
-                self.horizontal_move_augment_joint_randomness = dict()
+            self.horizontal_move_augment_joint_randomness = dict()
                 
         if self.args.vertical_move_augment and self.split == 'train':
-            if self.args.vertical_move_augment_purturb:
-                self.vertical_move_augment_joint_randomness = dict()
+            self.vertical_move_augment_joint_randomness = dict()
             
         if self.args.agent_dropout_augment:
             self.agent_dropout_augment_randomness = dict()
-            
-        self.collect_standardization_stats()
+        
+        #input_type = 'image'    
+        #self.predict(input_type=input_type)
+        
         
         self.tdata = pickle.load(
-            open(os.path.join(self.args.dataset_dir, self.args.tracklets_file_name), "rb")
-        )
-        
-        
+            open(os.path.join(self.args.dataset_dir, self.args.tracklets_file_name), "rb"))
+
     def prepare(self, dataset_dir):
         """
         Prepare the following lists based on the dataset_dir, self.split
@@ -183,36 +220,52 @@ class Collective(Dataset):
             - self.clip_joints_paths
             - self.clips
             (the following if needed)
+            - self.clip_ball_paths
             - self.horizontal_flip_mask
             - self.horizontal_mask
             - self.vertical_mask
             - self.agent_dropout_mask
         """  
-        clip_joints_paths = []  
+        annotations_thisdatasetdir = defaultdict()
+        clip_joints_paths = []
+
+        for annot_file in glob.glob(os.path.join(dataset_dir, 'videos/*/annotations.txt')):
+            video = annot_file.split('/')[-2]
+            with open(annot_file, 'r') as f:
+                lines = f.readlines()
+            for l in lines:
+                clip, label = l.split()[0].split('.jpg')[0], l.split()[1]
+                annotations_thisdatasetdir[(video, clip)] = self.class2idx[label]  
+
         for video in self.dataset_splits[self.split]:
             clip_joints_paths.extend(glob.glob(os.path.join(dataset_dir, self.args.joints_folder_name, str(video), '*.pickle')))
             
-        # count = 0
+        count = 0
         for path in clip_joints_paths:
-            video, clip = path.split("\\")[-2], path.split('\\')[-1].split('.pickle')[0]
+            video, clip = path.split('/')[-2], path.split('/')[-1].split('.pickle')[0]
             self.clips.append((video, clip))
-            self.annotations.append(self.annotations_CAD[int(video)][int(clip)]['group_activity'])
+            self.annotations.append(annotations_thisdatasetdir[(video, clip)])
             self.annotations_each_person.append(self.person_actions_all[(int(video), int(clip))])
-            # count += 1
+            if self.args.ball_trajectory_use:
+                self.clip_ball_paths.append(os.path.join(dataset_dir, self.args.ball_trajectory_folder_name, video, clip + '.txt'))
+            count += 1
         # print('total number of clips is {}'.format(count))
-        
+
         self.clip_joints_paths += clip_joints_paths
       
         assert len(self.annotations) == len(self.clip_joints_paths)
         assert len(self.annotations) == len(self.annotations_each_person)
         assert len(self.clip_joints_paths) == len(self.clips)
-        # pdb.set_trace()
-
+        if self.args.ball_trajectory_use:
+            assert len(self.clip_joints_paths) == len(self.clip_ball_paths)
+        
         true_data_size = len(self.annotations)
         true_annotations = copy.deepcopy(self.annotations)
         true_annotations_each_person = copy.deepcopy(self.annotations_each_person)
         true_clip_joints_paths = copy.deepcopy(self.clip_joints_paths)
         true_clips = copy.deepcopy(self.clips)
+        if self.args.ball_trajectory_use:
+            true_clip_ball_paths = copy.deepcopy(self.clip_ball_paths)
         
         # if horizontal flip augmentation and is training
         if self.args.horizontal_flip_augment and self.split == 'train':
@@ -221,6 +274,8 @@ class Collective(Dataset):
             self.annotations_each_person += true_annotations_each_person
             self.clip_joints_paths += true_clip_joints_paths
             self.clips += true_clips
+            if self.args.ball_trajectory_use:
+                self.clip_ball_paths += true_clip_ball_paths
                 
         # if horizontal move augmentation and is training
         if self.args.horizontal_move_augment and self.split == 'train':
@@ -229,6 +284,8 @@ class Collective(Dataset):
             self.annotations_each_person += true_annotations_each_person
             self.clip_joints_paths += true_clip_joints_paths
             self.clips += true_clips
+            if self.args.ball_trajectory_use:
+                self.clip_ball_paths += true_clip_ball_paths
       
         # if vertical move augmentation and is training
         if self.args.vertical_move_augment and self.split == 'train':
@@ -237,7 +294,9 @@ class Collective(Dataset):
             self.annotations_each_person += true_annotations_each_person
             self.clip_joints_paths += true_clip_joints_paths
             self.clips += true_clips
-            
+            if self.args.ball_trajectory_use:
+                self.clip_ball_paths += true_clip_ball_paths
+                
         # if random agent dropout augmentation and is training
         if self.args.agent_dropout_augment and self.split == 'train':
             self.agent_dropout_mask = list(np.zeros(len(self.annotations))) + list(np.ones(true_data_size))
@@ -245,12 +304,89 @@ class Collective(Dataset):
             self.annotations_each_person += true_annotations_each_person
             self.clip_joints_paths += true_clip_joints_paths
             self.clips += true_clips
-            
-    
+            if self.args.ball_trajectory_use:
+                self.clip_ball_paths += true_clip_ball_paths
+                    
     def __len__(self):
         return len(self.clip_joints_paths)
     
-    
+    def predict(self, input, 
+                draw_heatmap=False,
+                model_type='body',
+                skeleton_style='mmpose',
+                input_type='image'):
+        """Visualize the demo images.
+
+        Using mmdet to detect the human.
+        """
+
+        if model_type == 'rtmpose | face':
+            if cached_model[model_type] is None:
+                cached_model[model_type] = MMPoseInferencer(pose2d='face')
+            model = cached_model[model_type]
+
+        elif model_type == 'dwpose | wholebody':
+            if cached_model[model_type] is None:
+                cached_model[model_type] = MMPoseInferencer(
+                    pose2d=os.path.join(
+                        project_path, 'rtmpose/wholebody_2d_keypoint/'
+                        'rtmpose-l_8xb32-270e_coco-wholebody-384x288.py'),
+                    pose2d_weights='https://download.openmmlab.com/mmpose/v1/'
+                    'projects/rtmposev1/rtmpose-l_simcc-ucoco_dw-ucoco_270e-'
+                    '384x288-2438fd99_20230728.pth')
+            model = cached_model[model_type]
+
+        elif model_type == 'rtmw | wholebody':
+            if cached_model[model_type] is None:
+                cached_model[model_type] = MMPoseInferencer(
+                    pose2d=os.path.join(
+                        project_path, 'rtmpose/wholebody_2d_keypoint/'
+                        'rtmw-l_8xb320-270e_cocktail14-384x288.py'),
+                    pose2d_weights='https://download.openmmlab.com/mmpose/v1/'
+                    'projects/rtmw/rtmw-dw-x-l_simcc-cocktail14_270e-'
+                    '384x288-20231122.pth')
+            model = cached_model[model_type]
+
+        elif model_type == 'rtmpose | body':
+            if cached_model[model_type] is None:
+                cached_model[model_type] = MMPoseInferencer(pose2d='rtmpose-l')
+            model = cached_model[model_type]
+
+        elif model_type == 'rtmo | body':
+            if cached_model[model_type] is None:
+                cached_model[model_type] = MMPoseInferencer(pose2d='rtmo')
+            model = cached_model[model_type]
+            draw_heatmap = False
+
+        else:
+            if model_type =='body':
+                cached_model[model_type] = MMPoseInferencer(pose2d='rtmpose-l')
+            model = cached_model[model_type]
+
+        if input_type == 'image':
+
+            result = next(
+                model(
+                    input,
+                    return_vis=True,
+                    draw_heatmap=draw_heatmap,
+                    skeleton_style=skeleton_style))
+            img = result['visualization'][0][..., ::-1]
+            return img
+
+        elif input_type == 'video':
+
+            for _ in model(
+                    input,
+                    vis_out_dir='test.mp4',
+                    draw_heatmap=draw_heatmap,
+                    skeleton_style=skeleton_style):
+                pass
+
+            return 'test.mp4'
+
+        return model    
+
     def personwise_normalization(self, points, offset_points=None, 
                                  scale_distance_point_pairs=None,
                                  scale_distance_fn=None, scale_unit=None,
@@ -362,7 +498,7 @@ class Collective(Dataset):
                 print('Please check whether scale_distance_fn is supported!')
                 os._exit(0)
         
-        scale_distances = compute_scale_distances()
+        scale_distances = compute_scale_distances() 
         
         normalized_points = (points - offset_point) / (scale_distances * scale_unit + 1e-12)  # in case divide by 0
         return normalized_points
@@ -372,18 +508,30 @@ class Collective(Dataset):
         # get joint x/y mean, std over train set
         if self.split == 'train':
             if self.args.recollect_stats_train or (
-                not os.path.exists(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 'stats_train.pickle'))):
+                not os.path.exists(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 'stats_train.pickle'))):
                 joint_xcoords = []
                 joint_ycoords = []
                 joint_dxcoords = []
                 joint_dycoords = [] 
+                if self.args.ball_trajectory_use:
+                        ball_xcoords = []
+                        ball_ycoords = []
+                        ball_dxcoords = []
+                        ball_dycoords = [] 
 
                 for index in range(self.__len__()):   # including augmented data!
-                    with open(self.clip_joints_paths[index] , 'rb') as f:
+                    with open(self.clip_joints_paths[index], 'rb') as f:
                         joint_raw = pickle.load(f)
                         
                     frames = sorted(joint_raw.keys())[self.args.frame_start_idx:self.args.frame_end_idx+1:self.args.frame_sampling]
-                    
+
+                    if self.args.ball_trajectory_use:
+                        ball_trajectory_data = self.read_ball_trajectory(self.clip_ball_paths[index])
+                        ball_trajectory_data = ball_trajectory_data[self.args.frame_start_idx+10:self.args.frame_end_idx+1+10:self.args.frame_sampling]
+                        # ball trajectory annotation has 41 frames annotated but joint/track file only has 20 frames.
+                        assert len(ball_trajectory_data) == len(frames)
+                        # (T, 2)
+                       
                     # if horizontal flip augmentation and is training
                     if self.args.horizontal_flip_augment:
                         if index < len(self.horizontal_flip_mask):
@@ -392,33 +540,55 @@ class Collective(Dataset):
                                     self.horizontal_flip_augment_joint_randomness[index] = defaultdict()
                                     joint_raw = self.horizontal_flip_augment_joint(
                                         joint_raw, frames, 
-                                        add_purturbation=True, randomness_set=False, index=index, video_id=int(video))
+                                        add_purturbation=True, randomness_set=False, index=index)
                                 else:
-                                    joint_raw = self.horizontal_flip_augment_joint(joint_raw, frames, video_id=int(video))
+                                    joint_raw = self.horizontal_flip_augment_joint(joint_raw, frames)
                                     
+                                if self.args.ball_trajectory_use:
+                                    ball_trajectory_data = self.horizontal_flip_ball_trajectory(ball_trajectory_data)
+                                    
+                    
                     # if horizontal move augmentation and is training
                     if self.args.horizontal_move_augment:
                         if index < len(self.horizontal_mask):
                             if self.horizontal_mask[index]:
-                                if self.args.horizontal_move_augment_purturb:
-                                    self.horizontal_move_augment_joint_randomness[index] = defaultdict()
-                                    joint_raw = self.horizontal_move_augment_joint(
-                                        joint_raw, frames,  
-                                        add_purturbation=True, randomness_set=False, index=index)
+                                if self.args.ball_trajectory_use:
+                                    if self.args.horizontal_move_augment_purturb:
+                                        self.horizontal_move_augment_joint_randomness[index] = defaultdict()
+                                        joint_raw, ball_trajectory_data = self.horizontal_move_augment_joint(
+                                            joint_raw, frames,  
+                                            add_purturbation=True, randomness_set=False, index=index, ball_trajectory=ball_trajectory_data)
+                                    else:
+                                        joint_raw, ball_trajectory_data = self.horizontal_move_augment_joint(joint_raw, frames, ball_trajectory=ball_trajectory_data)
                                 else:
-                                    joint_raw = self.horizontal_move_augment_joint(joint_raw, frames)
+                                    if self.args.horizontal_move_augment_purturb:
+                                        self.horizontal_move_augment_joint_randomness[index] = defaultdict()
+                                        joint_raw = self.horizontal_move_augment_joint(
+                                            joint_raw, frames,  
+                                            add_purturbation=True, randomness_set=False, index=index)
+                                    else:
+                                        joint_raw = self.horizontal_move_augment_joint(joint_raw, frames)
                             
                     # if vertical move augmentation and is training
                     if self.args.vertical_move_augment:
                         if index < len(self.vertical_mask):
                             if self.vertical_mask[index]:
-                                if self.args.vertical_move_augment_purturb:
-                                    self.vertical_move_augment_joint_randomness[index] = defaultdict()
-                                    joint_raw = self.vertical_move_augment_joint(
-                                        joint_raw, frames,  
-                                        add_purturbation=True, randomness_set=False, index=index)
+                                if self.args.ball_trajectory_use:
+                                    if self.args.vertical_move_augment_purturb:
+                                        self.vertical_move_augment_joint_randomness[index] = defaultdict()
+                                        joint_raw, ball_trajectory_data = self.vertical_move_augment_joint(
+                                            joint_raw, frames,  
+                                            add_purturbation=True, randomness_set=False, index=index, ball_trajectory=ball_trajectory_data)
+                                    else:
+                                        joint_raw, ball_trajectory_data = self.vertical_move_augment_joint(joint_raw, frames, ball_trajectory=ball_trajectory_data)
                                 else:
-                                    joint_raw = self.vertical_move_augment_joint(joint_raw, frames)
+                                    if self.args.vertical_move_augment_purturb:
+                                        self.vertical_move_augment_joint_randomness[index] = defaultdict()
+                                        joint_raw = self.vertical_move_augment_joint(
+                                            joint_raw, frames,  
+                                            add_purturbation=True, randomness_set=False, index=index)
+                                    else:
+                                        joint_raw = self.vertical_move_augment_joint(joint_raw, frames)
                                     
                     # To compute statistics, no need to consider the random agent dropout augmentation,
                     # but we can set the randomness here.
@@ -426,14 +596,14 @@ class Collective(Dataset):
                     if self.args.agent_dropout_augment:
                         if index < len(self.agent_dropout_mask):
                             if self.agent_dropout_mask[index]:
-                                # chosen_frame = random.choice(frames)
+                                chosen_frame = random.choice(frames)
                                 chosen_person = random.choice(range(self.args.N))
-                                # self.agent_dropout_augment_randomness[index] = (chosen_frame, chosen_person)
-                                self.agent_dropout_augment_randomness[index] = chosen_person
+                                self.agent_dropout_augment_randomness[index] = (chosen_frame, chosen_person)
+            
                     
-                    
-                    (video, clip) = self.clips[index]
-                    joint_raw = self.joints_sanity_fix(joint_raw, frames, video_id=int(video))
+                    joint_raw = self.joints_sanity_fix(joint_raw, frames)
+                    if self.args.ball_trajectory_use:
+                        ball_trajectory_data = self.ball_trajectory_sanity_fix(ball_trajectory_data)
                     
 
                     for tidx, frame in enumerate(frames):
@@ -448,82 +618,128 @@ class Collective(Dataset):
                             joint_dxcoords.extend((np.zeros((self.args.N, self.args.J))).flatten().tolist())
                             joint_dycoords.extend((np.zeros((self.args.N, self.args.J))).flatten().tolist())
                             
-                    
-                # -- collect mean std
-                joint_xcoords_mean, joint_xcoords_std = np.mean(joint_xcoords), np.std(joint_xcoords)
-                joint_ycoords_mean, joint_ycoords_std = np.mean(joint_ycoords), np.std(joint_ycoords)
-                joint_dxcoords_mean, joint_dxcoords_std = np.mean(joint_dxcoords), np.std(joint_dxcoords)
-                joint_dycoords_mean, joint_dycoords_std = np.mean(joint_dycoords), np.std(joint_dycoords) 
+                    if self.args.ball_trajectory_use:
+                        ball_xcoords.extend(list(ball_trajectory_data[:, 0]))
+                        ball_ycoords.extend(list(ball_trajectory_data[:, 1]))
+                        
+                        for t in range(len(ball_trajectory_data)):
+                            if t == 0:
+                                ball_dxcoords.append(0)
+                                ball_dycoords.append(0)
+                            else:
+                                ball_dxcoords.append(ball_trajectory_data[t, 0] - ball_trajectory_data[t-1, 0])
+                                ball_dycoords.append(ball_trajectory_data[t, 1] - ball_trajectory_data[t-1, 1])
+                             
 
-                self.stats = {
-                    'joint_xcoords_mean': joint_xcoords_mean, 'joint_xcoords_std': joint_xcoords_std,
-                    'joint_ycoords_mean': joint_ycoords_mean, 'joint_ycoords_std': joint_ycoords_std,
-                    'joint_dxcoords_mean': joint_dxcoords_mean, 'joint_dxcoords_std': joint_dxcoords_std,
-                    'joint_dycoords_mean': joint_dycoords_mean, 'joint_dycoords_std': joint_dycoords_std
-                }
+                # -- collect mean std
+                if self.args.ball_trajectory_use:
+                    joint_xcoords_mean, joint_xcoords_std = np.mean(joint_xcoords), np.std(joint_xcoords)
+                    joint_ycoords_mean, joint_ycoords_std = np.mean(joint_ycoords), np.std(joint_ycoords)
+                    joint_dxcoords_mean, joint_dxcoords_std = np.mean(joint_dxcoords), np.std(joint_dxcoords)
+                    joint_dycoords_mean, joint_dycoords_std = np.mean(joint_dycoords), np.std(joint_dycoords)
+                    
+                    ball_xcoords_mean, ball_xcoords_std = np.mean(ball_xcoords), np.std(ball_xcoords)
+                    ball_ycoords_mean, ball_ycoords_std = np.mean(ball_ycoords), np.std(ball_ycoords)
+                    ball_dxcoords_mean, ball_dxcoords_std = np.mean(ball_dxcoords), np.std(ball_dxcoords)
+                    ball_dycoords_mean, ball_dycoords_std = np.mean(ball_dycoords), np.std(ball_dycoords) 
+
+
+                    self.stats = {
+                        'joint_xcoords_mean': joint_xcoords_mean, 'joint_xcoords_std': joint_xcoords_std,
+                        'joint_ycoords_mean': joint_ycoords_mean, 'joint_ycoords_std': joint_ycoords_std,
+                        'joint_dxcoords_mean': joint_dxcoords_mean, 'joint_dxcoords_std': joint_dxcoords_std,
+                        'joint_dycoords_mean': joint_dycoords_mean, 'joint_dycoords_std': joint_dycoords_std,
+                        'ball_xcoords_mean': ball_xcoords_mean, 'ball_xcoords_std': ball_xcoords_std,
+                        'ball_ycoords_mean': ball_ycoords_mean, 'ball_ycoords_std': ball_ycoords_std,
+                        'ball_dxcoords_mean': ball_dxcoords_mean, 'ball_dxcoords_std': ball_dxcoords_std,
+                        'ball_dycoords_mean': ball_dycoords_mean, 'ball_dycoords_std': ball_dycoords_std
+                    }
+
+                else:
+                    joint_xcoords_mean, joint_xcoords_std = np.mean(joint_xcoords), np.std(joint_xcoords)
+                    joint_ycoords_mean, joint_ycoords_std = np.mean(joint_ycoords), np.std(joint_ycoords)
+                    joint_dxcoords_mean, joint_dxcoords_std = np.mean(joint_dxcoords), np.std(joint_dxcoords)
+                    joint_dycoords_mean, joint_dycoords_std = np.mean(joint_dycoords), np.std(joint_dycoords) 
+
+                    self.stats = {
+                        'joint_xcoords_mean': joint_xcoords_mean, 'joint_xcoords_std': joint_xcoords_std,
+                        'joint_ycoords_mean': joint_ycoords_mean, 'joint_ycoords_std': joint_ycoords_std,
+                        'joint_dxcoords_mean': joint_dxcoords_mean, 'joint_dxcoords_std': joint_dxcoords_std,
+                        'joint_dycoords_mean': joint_dycoords_mean, 'joint_dycoords_std': joint_dycoords_std
+                    }
                     
                     
-                os.makedirs(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name), exist_ok=True)
-                with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 'stats_train.pickle'), 'wb') as f:
+                os.makedirs(os.path.join('datasets', 'volleyball', self.args.joints_folder_name), exist_ok=True)
+                with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 'stats_train.pickle'), 'wb') as f:
                     pickle.dump(self.stats, f)
                     
                 if self.args.horizontal_flip_augment and self.args.horizontal_flip_augment_purturb:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'horizontal_flip_augment_joint_randomness.pickle'), 'wb') as f:
                         pickle.dump(self.horizontal_flip_augment_joint_randomness, f)
                         
                 if self.args.horizontal_move_augment and self.args.horizontal_move_augment_purturb:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'horizontal_move_augment_joint_randomness.pickle'), 'wb') as f:
                         pickle.dump(self.horizontal_move_augment_joint_randomness, f)
                         
                 if self.args.vertical_move_augment and self.args.vertical_move_augment_purturb:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'vertical_move_augment_joint_randomness.pickle'), 'wb') as f:
                         pickle.dump(self.vertical_move_augment_joint_randomness, f)
                         
                 if self.args.agent_dropout_augment:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'agent_dropout_augment_randomness.pickle'), 'wb') as f:
                         pickle.dump(self.agent_dropout_augment_randomness, f)
                     
             else:
                 try:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 'stats_train.pickle'), 'rb') as f:
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 'stats_train.pickle'), 'rb') as f:
                         self.stats = pickle.load(f)
                 except FileNotFoundError:
                     print('Dataset statistics (e.g., mean, std) are missing! The dataset statistics pickle file should be generated during training.')
                     os._exit(0)
                     
                 if self.args.horizontal_flip_augment and self.args.horizontal_flip_augment_purturb:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'horizontal_flip_augment_joint_randomness.pickle'), 'rb') as f:
                         self.horizontal_flip_augment_joint_randomness = pickle.load(f)
                         
                 if self.args.horizontal_move_augment and self.args.horizontal_move_augment_purturb:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'horizontal_move_augment_joint_randomness.pickle'), 'rb') as f:
                         self.horizontal_move_augment_joint_randomness = pickle.load(f)
                         
                 if self.args.vertical_move_augment and self.args.vertical_move_augment_purturb:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'vertical_move_augment_joint_randomness.pickle'), 'rb') as f:
                         self.vertical_move_augment_joint_randomness = pickle.load(f)
                 
                 if self.args.agent_dropout_augment:
-                    with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 
+                    with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 
                                            'agent_dropout_augment_randomness.pickle'), 'rb') as f:
                         self.agent_dropout_augment_randomness = pickle.load(f)
         else:
             try:
-                with open(os.path.join('datasets', self.args.dataset_name, self.args.joints_folder_name, 'stats_train.pickle'), 'rb') as f:
+                with open(os.path.join('datasets', 'volleyball', self.args.joints_folder_name, 'stats_train.pickle'), 'rb') as f:
                     self.stats = pickle.load(f)
             except FileNotFoundError:
                 print('Dataset statistics (e.g., mean, std) are missing! The dataset statistics pickle file should be generated during training.')
                 os._exit(0)
                 
                 
-    def joints_sanity_fix(self, joint_raw, frames, video_id=None):
+    def read_ball_trajectory(self, filepath):
+        with open(filepath , 'r') as f:
+            ball_trajectory_lines = f.readlines()
+        ball_trajectory = []
+        for line in ball_trajectory_lines:
+            x, y = line.rstrip().split()
+            ball_trajectory.append([int(x), int(y)])
+        return np.array(ball_trajectory)
+            
+    
+    def joints_sanity_fix(self, joint_raw, frames):
         # note that it is possible the width_coords>1280 and height_coords>720 due to imperfect pose esitimation
         # here we fix these cases
         
@@ -533,35 +749,22 @@ class Collective(Dataset):
                     # joint_raw[t][n, j, 0] = int(joint_raw[t][n, j, 0])
                     # joint_raw[t][n, j, 1] = int(joint_raw[t][n, j, 1])
                     
-                    if video_id != None:
-                        if joint_raw[t][n, j, 0] >= self.FRAMES_SIZE[video_id][1]:
-                            joint_raw[t][n, j, 0] = self.FRAMES_SIZE[video_id][1] - 1
-
-                        if joint_raw[t][n, j, 1] >= self.FRAMES_SIZE[video_id][0]:
-                            joint_raw[t][n, j, 1] = self.FRAMES_SIZE[video_id][0] - 1
-
-                        if joint_raw[t][n, j, 0] < 0:
-                            joint_raw[t][n, j, 0] = 0
-
-                        if joint_raw[t][n, j, 1] < 0:
-                            joint_raw[t][n, j, 1] = 0 
-                    else:
-                        if joint_raw[t][n, j, 0] >= self.args.image_w:
-                            joint_raw[t][n, j, 0] = self.args.image_w - 1
-
-                        if joint_raw[t][n, j, 1] >= self.args.image_h:
-                            joint_raw[t][n, j, 1] = self.args.image_h - 1
-
-                        if joint_raw[t][n, j, 0] < 0:
-                            joint_raw[t][n, j, 0] = 0
-
-                        if joint_raw[t][n, j, 1] < 0:
-                            joint_raw[t][n, j, 1] = 0 
+                    if joint_raw[t][n, j, 0] >= self.args.image_w:
+                        joint_raw[t][n, j, 0] = self.args.image_w - 1
+                        
+                    if joint_raw[t][n, j, 1] >= self.args.image_h:
+                        joint_raw[t][n, j, 1] = self.args.image_h - 1
+                    
+                    if joint_raw[t][n, j, 0] < 0:
+                        joint_raw[t][n, j, 0] = 0
+                        
+                    if joint_raw[t][n, j, 1] < 0:
+                        joint_raw[t][n, j, 1] = 0 
                         
         # modify joint_raw - loop over each frame and pad the person dim because it can have less than N persons
         for f in joint_raw:
             n_persons = joint_raw[f].shape[0]
-            if n_persons < self.args.N:  # padding in case some clips has less than N persons
+            if n_persons < self.args.N:  # padding in case some clips has less than N persons 
                 joint_raw[f] = np.concatenate((
                     joint_raw[f], 
                     np.zeros((self.args.N-n_persons, self.args.J, joint_raw[f].shape[2]))), 
@@ -569,17 +772,31 @@ class Collective(Dataset):
         return joint_raw
     
     
-    def horizontal_flip_augment_joint(
-        self, joint_raw, frames, add_purturbation=False, randomness_set=False, index=0, video_id=None):
+    def ball_trajectory_sanity_fix(self, ball_trajectory):
+        # ball_trajectory: (T, 2)
+        for t in range(len(ball_trajectory)):
+            if ball_trajectory[t, 0] >= self.args.image_w:
+                ball_trajectory[t, 0] = self.args.image_w - 1
+                
+            if ball_trajectory[t, 1] >= self.args.image_h:
+                ball_trajectory[t, 1] = self.args.image_h - 1
+
+            if ball_trajectory[t, 0] < 0:
+                ball_trajectory[t, 0] = 0
+
+            if ball_trajectory[t, 1] < 0:
+                ball_trajectory[t, 1] = 0 
+        return ball_trajectory
+            
+    
+    
+    def horizontal_flip_augment_joint(self, joint_raw, frames, add_purturbation=False, randomness_set=False, index=0):
         for t in frames:
             for n in range(len(joint_raw[t])):
                 if not np.any(joint_raw[t][n][:,:2]):  # all 0s, not actual joint coords
                     continue
                 for j in range(len(joint_raw[t][n])):
-                    if video_id != None:
-                        joint_raw[t][n, j, 0] = self.FRAMES_SIZE[video_id][1] - joint_raw[t][n, j, 0]  # flip joint coordinates
-                    else:
-                        joint_raw[t][n, j, 0] = self.args.image_w - joint_raw[t][n, j, 0]  # flip joint coordinates
+                    joint_raw[t][n, j, 0] = self.args.image_w - joint_raw[t][n, j, 0]  # flip joint coordinates
                     if add_purturbation:
                         if not randomness_set:
                             self.horizontal_flip_augment_joint_randomness[index][(t, n, j)] = random.uniform(
@@ -590,8 +807,7 @@ class Collective(Dataset):
         return joint_raw
     
     
-    def horizontal_move_augment_joint(
-        self, joint_raw, frames, add_purturbation=False, randomness_set=True, index=0, max_horizontal_diff=10.0, ball_trajectory=None):
+    def horizontal_move_augment_joint(self, joint_raw, frames, add_purturbation=False, randomness_set=True, index=0, max_horizontal_diff=10.0, ball_trajectory=None):
         horizontal_change = np.random.uniform(low=-max_horizontal_diff, high=max_horizontal_diff)
         for t in frames:
             for n in range(len(joint_raw[t])):
@@ -612,8 +828,7 @@ class Collective(Dataset):
             return joint_raw
         
     
-    def vertical_move_augment_joint(
-        self, joint_raw, frames, add_purturbation=False, randomness_set=True, index=0, max_vertical_diff=10.0, ball_trajectory=None):
+    def vertical_move_augment_joint(self, joint_raw, frames, add_purturbation=False, randomness_set=True, index=0, max_vertical_diff=10.0, ball_trajectory=None):
         vertical_change = np.random.uniform(low=-max_vertical_diff, high=max_vertical_diff)
         for t in frames:
             for n in range(len(joint_raw[t])):
@@ -632,17 +847,26 @@ class Collective(Dataset):
             return joint_raw, ball_trajectory
         else:
             return joint_raw
-
-
+    
+    
     def agent_dropout_augment_joint(self, joint_feats, frames, index=0, J=17):
         # joint_feats: (N, J, T, d)
-        chosen_person = self.agent_dropout_augment_randomness[index]
-        T = joint_feats.shape[2]
+        chosen_frame = self.agent_dropout_augment_randomness[index][0] 
+        chosen_person = self.agent_dropout_augment_randomness[index][1] 
         feature_dim = joint_feats.shape[3]
 
-        joint_feats[chosen_person, :, :, :] = torch.zeros(J, T, feature_dim)
+        joint_feats[chosen_person, :, frames.index(chosen_frame), :] = torch.zeros(J, feature_dim)
         return joint_feats
     
+    
+    def horizontal_flip_ball_trajectory(self, ball_trajectory):
+        # ball_trajectory: (T, 2)
+        for t in range(len(ball_trajectory)):
+             ball_trajectory[t, 0] = self.args.image_w - ball_trajectory[t, 0]
+        return ball_trajectory
+            
+
+
     
     def __getitem__(self, index):
         # index = 0
@@ -656,6 +880,13 @@ class Collective(Dataset):
         # 3: [joint_x, joint_y, joint_type]
         
         frames = sorted(joint_raw.keys())[self.args.frame_start_idx:self.args.frame_end_idx+1:self.args.frame_sampling]
+        
+        if self.args.ball_trajectory_use:
+            ball_trajectory_data = self.read_ball_trajectory(self.clip_ball_paths[index])
+            ball_trajectory_data = ball_trajectory_data[self.args.frame_start_idx+10:self.args.frame_end_idx+1+10:self.args.frame_sampling]
+            # ball trajectory annotation has 41 frames annotated but joint/track file only has 20 frames.
+            assert len(ball_trajectory_data) == len(frames)
+            # (T, 2)
                         
         person_labels = torch.LongTensor(person_labels[frames[0]].squeeze())  # person action remains to be the same across all frames 
         # person_labels: (N, )
@@ -666,31 +897,57 @@ class Collective(Dataset):
                 if self.horizontal_flip_mask[index]:
                     if self.args.horizontal_flip_augment_purturb:
                         joint_raw = self.horizontal_flip_augment_joint(
-                            joint_raw, frames, add_purturbation=True, randomness_set=True, index=index, video_id=int(video))
+                            joint_raw, frames, add_purturbation=True, randomness_set=True, index=index)
                     else:
-                        joint_raw = self.horizontal_flip_augment_joint(joint_raw, frames, video_id=int(video))
-                            
+                        joint_raw = self.horizontal_flip_augment_joint(joint_raw, frames)
+                    label = self.classidx_horizontal_flip_augment[label]  # label has to be flipped!
+                    
+                    if self.args.ball_trajectory_use:
+                        ball_trajectory_data = self.horizontal_flip_ball_trajectory(ball_trajectory_data)
+                        
         # if horizontal move augmentation and is training
         if self.args.horizontal_move_augment and self.split == 'train':
             if index < len(self.horizontal_mask):
                 if self.horizontal_mask[index]:
-                    if self.args.horizontal_move_augment_purturb:
-                        joint_raw = self.horizontal_move_augment_joint(
-                            joint_raw, frames, add_purturbation=True, randomness_set=True, index=index)
+                    if self.args.ball_trajectory_use:
+                        if self.args.horizontal_move_augment_purturb:
+                            joint_raw, ball_trajectory_data = self.horizontal_move_augment_joint(
+                                joint_raw, frames, add_purturbation=True, randomness_set=True, 
+                                index=index, ball_trajectory=ball_trajectory_data)
+                        else:
+                            joint_raw, ball_trajectory_data = self.horizontal_move_augment_joint(
+                                joint_raw, frames, ball_trajectory=ball_trajectory_data) 
                     else:
-                        joint_raw = self.horizontal_move_augment_joint(joint_raw, frames)  
-                    
+                        if self.args.horizontal_move_augment_purturb:
+                            joint_raw = self.horizontal_move_augment_joint(
+                                joint_raw, frames, add_purturbation=True, randomness_set=True, index=index)
+                        else:
+                            joint_raw = self.horizontal_move_augment_joint(joint_raw, frames)  
+                        
         # if vertical move augmentation and is training
         if self.args.vertical_move_augment and self.split == 'train':
             if index < len(self.vertical_mask):
                 if self.vertical_mask[index]:
-                    if self.args.vertical_move_augment_purturb:
-                        joint_raw = self.vertical_move_augment_joint(
-                            joint_raw, frames, add_purturbation=True, randomness_set=True, index=index)
+                    if self.args.ball_trajectory_use:
+                        if self.args.vertical_move_augment_purturb:
+                            joint_raw, ball_trajectory_data = self.vertical_move_augment_joint(
+                                joint_raw, frames, add_purturbation=True, 
+                                randomness_set=True, index=index, 
+                                ball_trajectory=ball_trajectory_data)
+                        else:
+                            joint_raw, ball_trajectory_data = self.vertical_move_augment_joint(
+                                joint_raw, frames, ball_trajectory=ball_trajectory_data) 
                     else:
-                        joint_raw = self.vertical_move_augment_joint(joint_raw, frames)                  
+                        if self.args.vertical_move_augment_purturb:
+                            joint_raw = self.vertical_move_augment_joint(
+                                joint_raw, frames, add_purturbation=True, 
+                                randomness_set=True, index=index)
+                        else:
+                            joint_raw = self.vertical_move_augment_joint(joint_raw, frames)                  
                     
-        joint_raw = self.joints_sanity_fix(joint_raw, frames, video_id=int(video))
+        joint_raw = self.joints_sanity_fix(joint_raw, frames)
+        if self.args.ball_trajectory_use:
+            ball_trajectory_data = self.ball_trajectory_sanity_fix(ball_trajectory_data)
         
         
         # get joint_coords_all for image coordinates embdding
@@ -705,10 +962,8 @@ class Collective(Dataset):
                     for tidx, frame in enumerate(frames):
                         joint_x, joint_y, joint_type = joint_raw[frame][n,j,:]
                         
-                        # joint_x = min(int(joint_x), self.args.image_w-1)
-                        # joint_y = min(int(joint_y), self.args.image_h-1)
-                        joint_x = min(joint_x, self.FRAMES_SIZE[int(video)][1]-1)
-                        joint_y = min(joint_y, self.FRAMES_SIZE[int(video)][0]-1)
+                        joint_x = min(joint_x, self.args.image_w-1)
+                        joint_y = min(joint_y, self.args.image_h-1)
                         joint_x = max(0, joint_x)
                         joint_y = max(0, joint_y)
 
@@ -722,14 +977,11 @@ class Collective(Dataset):
                 
                 
         # get basic joint features (std normalization)
-        joint_feats_basic = []  # (N, J, T, d_0_v1)
-
+        joint_feats_basic = []  # (N, J, T, d_0_v1) 
         for n in range(self.args.N):
             joint_feats_n = []
-
             for j in range(self.args.J):
                 joint_feats_j = []
-
                 for tidx, frame in enumerate(frames):
                     joint_x, joint_y, joint_type = joint_raw[frame][n,j,:]
 
@@ -759,9 +1011,8 @@ class Collective(Dataset):
         for f in frames:
             joint_personwise_normalized[f] = self.personwise_normalization(
                 torch.Tensor(joint_raw[f][:,:,:-1]), 
-                video=video, clip=clip, frame=f)  
-            # (N, J, 2) the 2 dims are joint_x, joint_y
-
+                video=video, clip=clip, frame=f) 
+            
         for n in range(self.args.N):
             joint_feats_n = []
 
@@ -780,7 +1031,7 @@ class Collective(Dataset):
                     joint_feats_j.append(joint_feat)
                 joint_feats_n.append(joint_feats_j)
             joint_feats_advanced.append(joint_feats_n)
-            
+
         # adding joint metric features
         joint_feats_metrics = []  # (N, J, T, d_metrics)
         for frame_idx, frame in enumerate(frames):  # loop over frames of this clip
@@ -808,14 +1059,14 @@ class Collective(Dataset):
         joint_feats_metrics = np.concatenate(
             (joint_feats_metrics,
              np.tile(person_agg, self.args.J)[:,:,:,np.newaxis]), axis=-1)
-
-        
+                
+            
         
         joint_feats = torch.cat((torch.Tensor(np.array(joint_feats_basic)), 
                                  torch.Tensor(np.array(joint_feats_metrics)).permute(1,2,0,3), 
                                  torch.Tensor(np.array(joint_feats_advanced)), 
                                  torch.Tensor(np.array(joint_coords_all))), dim=-1)  
-        
+                
         
         # if random agent dropout augmentation and is training                
         if self.args.agent_dropout_augment and self.split == 'train':
@@ -824,10 +1075,38 @@ class Collective(Dataset):
                     joint_feats = self.agent_dropout_augment_joint(
                             joint_feats, frames, index=index, J=self.args.J)
                     
-        ball_feats = torch.zeros(len(frames), 6)
+        if self.args.ball_trajectory_use:
+            # get ball trajectory features (std normalization)
+            ball_feats_basic = []  # (T, 4)
+
+            for t in range(len(ball_trajectory_data)):
+                ball_x, ball_y = ball_trajectory_data[t]
+
+                ball_feat = []
+
+                ball_feat.append((ball_x-self.stats['ball_xcoords_mean'])/self.stats['ball_xcoords_std'])
+                ball_feat.append((ball_y-self.stats['ball_ycoords_mean'])/self.stats['ball_ycoords_std'])
+
+                if t != 0:
+                    pre_ball_x, pre_ball_y  = ball_trajectory_data[t-1]
+                    ball_dx, ball_dy = ball_x - pre_ball_x, ball_y - pre_ball_y 
+                else:
+                    ball_dx, ball_dy = 0, 0
+
+                ball_feat.append((ball_dx-self.stats['ball_dxcoords_mean'])/self.stats['ball_dxcoords_std'])
+                ball_feat.append((ball_dy-self.stats['ball_dycoords_mean'])/self.stats['ball_dycoords_std'])
+
+
+                ball_feats_basic.append(ball_feat)
+                
+            ball_feats = torch.cat((torch.Tensor(np.array(ball_feats_basic)), torch.Tensor(ball_trajectory_data)), dim=-1)
+            # (T, 6)
+        else:
+            ball_feats = torch.zeros(len(frames), 6)
             
+        for tidx, frame in enumerate(frames):
+            print(os.path.join('/mnt/c/Users/Michele/source/repos/composer/datasets/zip/volleyball/videos', video, clip, str(frame) + '.jpg'))    
+            self.predict(input =os.path.join('/mnt/c/Users/Michele/source/repos/composer/datasets/zip/volleyball/videos', video, clip, str(frame) + '.jpg'))
         
         assert not torch.isnan(joint_feats).any() 
-        
         return joint_feats, label, video, clip, person_labels, ball_feats
- 
