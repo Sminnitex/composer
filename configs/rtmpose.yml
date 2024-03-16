@@ -1,12 +1,15 @@
-exp_name: composer_vd_original
+exp_name: composer_siv_project
 
 
 # -- Dataset settings
-dataset_name: collective
-dataset_dir: C:\Users\Michele\source\repos\composer\datasets\zip\collective
+dataset_name: rtmpose
+dataset_dir: /mnt/c/Users/Michele/source/repos/composer/datasets/zip/volleyball
+olympic_split: False
+ball_trajectory_use: True
 joints_folder_name: joints
 tracklets_file_name: tracks_normalized.pkl
 person_action_label_file_name: tracks_normalized_with_person_action_label.pkl
+ball_trajectory_folder_name: volleyball_ball_annotation
 
 horizontal_flip_augment: True
 horizontal_flip_augment_purturb: True
@@ -16,27 +19,26 @@ vertical_move_augment: True
 vertical_move_augment_purturb: True
 agent_dropout_augment: True
 
-image_h: 480
-image_w: 800
-num_classes: 4
-num_person_action_classes: 5
-frame_start_idx: 0
-frame_end_idx: 10
+image_h: 720
+image_w: 1280
+num_classes: 8
+num_person_action_classes: 10
+frame_start_idx: 5
+frame_end_idx: 14
 frame_sampling: 1
-N: 13
+N: 12 
 J: 17
 T: 10
-G: 2
-recollect_stats_train: True
+recollect_stats_train: False
 
 
 # -- Training settings
 seed: -1
-batch_size: 384
-num_epochs: 200
+batch_size: 256
+num_epochs: 5
 num_workers: -1
 optimizer: 'adam'
-learning_rate: 0.0005
+learning_rate: 0.0001
 weight_decay: 0.001
 
 
@@ -52,7 +54,7 @@ use_person_action_weights: True
 
 
 # -- Contrastive cluster assignment
-nmb_prototypes: 1000
+nmb_prototypes: 100
 temperature: 0.1
 sinkhorn_iterations: 3
 loss_coe_constrastive_clustering: 1
@@ -73,13 +75,13 @@ image_position_embedding_type: learned_fourier_2D
 # ------ Multiscale Transformer settings
 projection_batchnorm: False
 projection_dropout: 0
-TNT_hidden_dim: 128
+TNT_hidden_dim: 256
 TNT_n_layers: 2
 innerTx_nhead: 2 
 innerTx_dim_feedforward: 1024
 innerTx_dropout: 0.5
 innerTx_activation: relu 
-middleTx_nhead: 2
+middleTx_nhead: 8
 middleTx_dim_feedforward: 1024
 middleTx_dropout: 0.2
 middleTx_activation: relu 
