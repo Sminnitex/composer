@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import math
+import math, os
 from kmeans_pytorch import kmeans
 
 from models.misc import build_mlp 
@@ -66,7 +66,12 @@ class COMPOSER(nn.Module):
                                                       use_batchnorm=args.projection_batchnorm,
                                                       dropout=args.projection_dropout)
   
-        
+        if self.args.dataset_name == 'rtmpose':
+            self.person_to_group_projection = build_mlp(input_dim=(args.N//2)*args.TNT_hidden_dim,
+                                                      hidden_dims=[args.TNT_hidden_dim], 
+                                                      output_dim=args.TNT_hidden_dim,
+                                                      use_batchnorm=args.projection_batchnorm,
+                                                      dropout=args.projection_dropout)        
         # ball track projection layer
         if hasattr(args, 'ball_trajectory_use') and args.ball_trajectory_use:
             self.ball_track_projection_layer = build_mlp(input_dim=(2*args.joint_initial_feat_dim+4)*args.T,
@@ -84,6 +89,8 @@ class COMPOSER(nn.Module):
                 from models.tnt_four_scales import TNT
             elif self.args.dataset_name == 'collective':
                 from models.tnt_four_scales_collective import TNT
+            elif self.args.dataset_name == 'rtmpose':
+                from models.tnt_four_scales import TNT
             else:
                 print('Please check the dataset name!')
                 os._exit(0)
@@ -219,7 +226,26 @@ class COMPOSER(nn.Module):
                     this_cluster_person_idx = (cluster_ids_x[b_idx] == c_idx).nonzero().squeeze()
                     group_track_feats_thisbatch_proj[b_idx, c_idx] =  torch.sum(
                         person_track_feats_thisbatch_proj[b_idx, this_cluster_person_idx, :], dim=0)
-                
+        
+        elif self.args.dataset_name == 'rtmpose':
+            people_middle_hip_coords = (
+                joint_feats_for_person_thisbatch[:,:,11,self.args.group_person_frame_idx,-2:] + 
+                joint_feats_for_person_thisbatch[:,:,12,self.args.group_person_frame_idx,-2:]) / 2
+            # (B, N, 2)  - W, H (X, Y)
+
+            people_idx_sort_by_middle_hip_xcoord = torch.argsort(people_middle_hip_coords[:,:,0], dim=-1)  # (B, N)
+            left_group_people_idx = people_idx_sort_by_middle_hip_xcoord[:, :int(self.args.N//2)]  # (B, N/2)
+            right_group_people_idx = people_idx_sort_by_middle_hip_xcoord[:, int(self.args.N//2):]  # (B, N/2)
+      
+            # form sequence of group track tokens
+            left_group_people_repre = person_track_feats_thisbatch_proj.flatten(
+                0,1)[left_group_people_idx.flatten(0,1)].view(B, int(self.args.N//2), -1)  # (B, N/2, d)
+            right_group_people_repre = person_track_feats_thisbatch_proj.flatten(
+                0,1)[right_group_people_idx.flatten(0,1)].view(B, int(self.args.N//2), -1)  # (B, N/2, d)
+            left_group_feats_thisbatch_proj = self.person_to_group_projection(left_group_people_repre.flatten(1,2))   # (B, d)
+            right_group_feats_thisbatch_proj = self.person_to_group_projection(right_group_people_repre.flatten(1,2))   # (B, d)
+            group_track_feats_thisbatch_proj = torch.stack([left_group_feats_thisbatch_proj, right_group_feats_thisbatch_proj], dim=1)  # (B, 2, d)
+                            
         else:
             print('Please check the dataset name!')
             os._exit(0)
@@ -260,6 +286,16 @@ class COMPOSER(nn.Module):
                                    interaction_track_feats_thisbatch_proj.transpose(0, 1),  # (N*(N-1), B, d)
                                    group_track_feats_thisbatch_proj.transpose(0, 1)  # (2, B, d)
                                   )
+            elif self.args.dataset_name == 'rtmpose':
+                outputs = self.TNT(CLS.transpose(0, 1),  # (1, B, d)
+                                   joint_track_feats_thisbatch_proj.transpose(0, 1),  # (N*J, B, d)
+                                   person_track_feats_thisbatch_proj.transpose(0, 1),  # (N, B, d)
+                                   interaction_track_feats_thisbatch_proj.transpose(0, 1),  # (N*(N-1), B, d)
+                                   group_track_feats_thisbatch_proj.transpose(0, 1),  # (2, B, d)
+                                   left_group_people_idx,
+                                   right_group_people_idx
+                                  )                
+                
             else:
                 print('Please check the dataset name!')
                 os._exit(0)
