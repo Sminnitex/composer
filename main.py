@@ -10,6 +10,7 @@ import pprint
 import random
 import numpy as np
 import platform
+import torch.multiprocessing as mp
 
 from datasets.data_loader import return_dataset
 from models import create_model
@@ -325,6 +326,11 @@ def testing_main(args):
 if __name__ == '__main__':
     
     args = get_args_parser()
+    mp.set_start_method('spawn')
+    p = mp.Process()
+    p.start()
+    p.join()
+
     
     if args.mode == "train":
         training_main(args)
