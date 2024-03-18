@@ -125,22 +125,36 @@ class COMPOSER(nn.Module):
         d = self.args.TNT_hidden_dim
         
         device = joint_feats_thisbatch.device
-        
-        joint_feats_for_person_thisbatch = joint_feats_thisbatch[:,:,:,:,:self.args.joint2person_feat_dim]
-        joint_img_coords = joint_feats_thisbatch[:,:,:,:,-2:]
-          
+        if self.args.dataset_name == 'rtmpose':
+            joint_feats_for_person_thisbatch = joint_feats_thisbatch[:,:,:,:self.args.joint2person_feat_dim]
+            joint_img_coords = joint_feats_thisbatch[:,:,:,-2:]
+        else:
+            joint_feats_for_person_thisbatch = joint_feats_thisbatch[:,:,:,:,:self.args.joint2person_feat_dim]
+            joint_img_coords = joint_feats_thisbatch[:,:,:,:,-2:]
+              
         # image coords positional encoding
-        image_coords = joint_feats_thisbatch[:,:,:,:,-2:].to(torch.int64).cuda()
+        if self.args.dataset_name == 'rtmpose':
+            image_coords = joint_feats_thisbatch[:,:,:,-2:].to(torch.int64).cuda()
+        else:
+            image_coords = joint_feats_thisbatch[:,:,:,:,-2:].to(torch.int64).cuda()
+
         coords_h = np.linspace(0, 1, self.args.image_h, endpoint=False)
         coords_w = np.linspace(0, 1, self.args.image_w, endpoint=False)
         xy_grid = np.stack(np.meshgrid(coords_w, coords_h), -1)
         xy_grid = torch.tensor(xy_grid).unsqueeze(0).permute(0, 3, 1, 2).float().contiguous().to(device)
         image_coords_learned =  self.image_embed_layer(xy_grid).squeeze(0).permute(1, 2, 0)
-        image_coords_embeded = image_coords_learned[image_coords[:,:,:,:,1], image_coords[:,:,:,:,0]]
+        if self.args.dataset_name == 'rtmpose':
+            image_coords_embeded = image_coords_learned[image_coords[:,:,:,1], image_coords[:,:,:,0]]
+        else:
+            image_coords_embeded = image_coords_learned[image_coords[:,:,:,:,1], image_coords[:,:,:,:,0]]
         # (B, N, J, T, d_0)
         
         # update by joint_feats_thisbatch removing the raw joint coordinates dim (last 2 dims by default)
-        joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-2]  
+        if self.args.dataset_name == 'rtmpose':
+            joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:-2]  
+        else:
+            joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-2]  
+        
 
             
         # time positional encoding
@@ -148,7 +162,11 @@ class COMPOSER(nn.Module):
         time_seq = self.time_embed_layer(time_ids) 
         
         # joint classes embedding learning as tokens/nodes
-        joint_class_ids = joint_feats_thisbatch[:,:,:,:,-1]  # note that the last dim is the joint class id by default
+        if self.args.dataset_name == 'rtmpose':
+            joint_class_ids = joint_feats_thisbatch[:,:,:,-1]
+        else:
+            joint_class_ids = joint_feats_thisbatch[:,:,:,:,-1]
+          # note that the last dim is the joint class id by default
         joint_classes_embeded = self.joint_class_embed_layer(joint_class_ids.type(torch.LongTensor).cuda()) # (B, N, J, T, d_0)
         
         x = joint_classes_embeded.transpose(2, 3).flatten(0, 1).flatten(0, 1)  # x: (B*N*T, J, d_0)
@@ -157,7 +175,11 @@ class COMPOSER(nn.Module):
         joint_classes_encode = joint_classes_encode.view(B, N, T, J, -1).transpose(2, 3)  # (B, N, J, T, d_0)
          
         # update by joint_feats_thisbatch removing the joint class dim (last dim by default)
-        joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-1]
+        if self.args.dataset_name == 'rtmpose':
+            joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:-1]
+        else:
+            joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-1]
+        
             
 
         # CLS initial embedding
