@@ -10,6 +10,7 @@ joints_folder_name: joints
 tracklets_file_name: tracks_normalized.pkl
 person_action_label_file_name: tracks_normalized_with_person_action_label.pkl
 ball_trajectory_folder_name: volleyball_ball_annotation
+isvideo: True
 
 horizontal_flip_augment: True
 horizontal_flip_augment_purturb: True

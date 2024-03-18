@@ -10,6 +10,7 @@ joints_folder_name: joints
 tracklets_file_name: tracks_normalized.pkl
 person_action_label_file_name: tracks_normalized_with_person_action_label.pkl
 ball_trajectory_folder_name: volleyball_ball_annotation
+isvideo: False
 
 horizontal_flip_augment: True
 horizontal_flip_augment_purturb: True
@@ -34,9 +35,9 @@ recollect_stats_train: False
 
 # -- Training settings
 seed: -1
-batch_size: 256
+batch_size: 64
 num_epochs: 5
-num_workers: -1
+num_workers: 0
 optimizer: 'adam'
 learning_rate: 0.0001
 weight_decay: 0.001
@@ -65,7 +66,7 @@ model_type: composer
 group_person_frame_idx: 5
 joint_initial_feat_dim: 8
 joint2person_feat_dim: 2
-num_gcn_layers: 3
+num_gcn_layers: 2
 max_num_tokens: 10
 max_times_embed: 100
 time_position_embedding_type: absolute_learned_1D 
