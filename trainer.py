@@ -155,7 +155,7 @@ class Trainer():
         self.criterion_person.eval()
         
         results = dict()
-
+        
         for i, batch_data in enumerate(self.test_loader):
             
             (joint_feats_thisbatch, targets_thisbatch, 

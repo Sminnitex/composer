@@ -27,7 +27,7 @@ num_person_action_classes: 10
 frame_start_idx: 5
 frame_end_idx: 14
 frame_sampling: 1
-N: 12 
+N: 12
 J: 17
 T: 10
 recollect_stats_train: False
@@ -35,7 +35,7 @@ recollect_stats_train: False
 
 # -- Training settings
 seed: -1
-batch_size: 64
+batch_size: 128
 num_epochs: 5
 num_workers: 0
 optimizer: 'adam'

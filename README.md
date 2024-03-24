@@ -26,7 +26,19 @@ pip install scipy
 pip install tqdm     
 conda install matplotlib     
 conda install scikit-learn     
-pip install numba      
+pip install numba   
+
+# Installation RTMPose
+pip install Openmim
+pip install openxlab
+pip install gradio==3.38.0
+
+mim install "mmcv>=2.0.0"
+mim install "mmengine>=0.9.0"
+mim install "mmdet>=3.0.0"
+mim install mmpose
+
+And the-comment the "download" lines of code on datasets/rtmpose.py
     
        
 To run COMPOSER on the Collective Activity dataset, kmeans-pytorch has to be installed. First, find a new directory to clone the following repo:    

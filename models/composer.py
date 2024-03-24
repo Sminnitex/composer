@@ -116,7 +116,10 @@ class COMPOSER(nn.Module):
         
          
     def forward(self, joint_feats_thisbatch, ball_feats_thisbatch):
-        
+        if self.args.dataset_name == 'rtmpose':
+            print(joint_feats_thisbatch.shape)
+            joint_feats_thisbatch = joint_feats_thisbatch.view(128, 72, 128, 30, 10)
+
         B = joint_feats_thisbatch.size(0)
         N = joint_feats_thisbatch.size(1)
         J = joint_feats_thisbatch.size(2)
@@ -126,14 +129,18 @@ class COMPOSER(nn.Module):
         
         device = joint_feats_thisbatch.device
         if self.args.dataset_name == 'rtmpose':
-            joint_feats_for_person_thisbatch = joint_feats_thisbatch[:,:,:,:self.args.joint2person_feat_dim]
-            joint_img_coords = joint_feats_thisbatch[:,:,:,-2:]
+            #joint_feats_thisbatch = joint_feats_thisbatch[0:64, 13:72, 18:100, 11:128, 12:30]
+            print(joint_feats_thisbatch.shape)
+            joint_feats_for_person_thisbatch = joint_feats_thisbatch[:,:,:,:,:self.args.joint2person_feat_dim]
+            joint_img_coords = joint_feats_thisbatch[:,:,:,:,-2:]
         else:
+            print("VOLLEYBALL GANG")
+            print(joint_feats_thisbatch.shape)
             joint_feats_for_person_thisbatch = joint_feats_thisbatch[:,:,:,:,:self.args.joint2person_feat_dim]
             joint_img_coords = joint_feats_thisbatch[:,:,:,:,-2:]
               
         # image coords positional encoding
-        if self.args.dataset_name == 'rtmpose':
+        if self.args.dataset_name == 'rtmpose2':
             image_coords = joint_feats_thisbatch[:,:,:,-2:].to(torch.int64).cuda()
         else:
             image_coords = joint_feats_thisbatch[:,:,:,:,-2:].to(torch.int64).cuda()
@@ -143,17 +150,17 @@ class COMPOSER(nn.Module):
         xy_grid = np.stack(np.meshgrid(coords_w, coords_h), -1)
         xy_grid = torch.tensor(xy_grid).unsqueeze(0).permute(0, 3, 1, 2).float().contiguous().to(device)
         image_coords_learned =  self.image_embed_layer(xy_grid).squeeze(0).permute(1, 2, 0)
-        if self.args.dataset_name == 'rtmpose':
+        if self.args.dataset_name == 'rtmpose2':
             image_coords_embeded = image_coords_learned[image_coords[:,:,:,1], image_coords[:,:,:,0]]
         else:
             image_coords_embeded = image_coords_learned[image_coords[:,:,:,:,1], image_coords[:,:,:,:,0]]
         # (B, N, J, T, d_0)
         
         # update by joint_feats_thisbatch removing the raw joint coordinates dim (last 2 dims by default)
-        if self.args.dataset_name == 'rtmpose':
+        if self.args.dataset_name == 'rtmpose2':
             joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:-2]  
         else:
-            joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-2]  
+            joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-2] 
         
 
             
@@ -162,20 +169,24 @@ class COMPOSER(nn.Module):
         time_seq = self.time_embed_layer(time_ids) 
         
         # joint classes embedding learning as tokens/nodes
-        if self.args.dataset_name == 'rtmpose':
+        if self.args.dataset_name == 'rtmpose2':
             joint_class_ids = joint_feats_thisbatch[:,:,:,-1]
         else:
             joint_class_ids = joint_feats_thisbatch[:,:,:,:,-1]
           # note that the last dim is the joint class id by default
-        joint_classes_embeded = self.joint_class_embed_layer(joint_class_ids.type(torch.LongTensor).cuda()) # (B, N, J, T, d_0)
-        
+       
+        joint_classes_embeded = self.joint_class_embed_layer(joint_class_ids.type(torch.LongTensor).cuda()) # (B, N, J,$        print(joint_classes_embeded.shape)
         x = joint_classes_embeded.transpose(2, 3).flatten(0, 1).flatten(0, 1)  # x: (B*N*T, J, d_0)
-        input = (x, self.adj.repeat(B*N*T, 1, 1).cuda())  # adj: # (B*N*T, J, J)
-        joint_classes_encode = self.joint_class_gcn_layers(input)[0]
+        #print(x.shape)
+        #print(self.adj.shape)
+        #print(x.type())
+        #print(self.adj.repeat(B*N*T, 1, 1).shape())
+        #input = (x.cuda(), self.adj.repeat(B*N*T, 1, 1, 1).cuda())  # adj: # (B*N*T, J, J)
+        joint_classes_encode = self.joint_class_gcn_layers(x)[0]
         joint_classes_encode = joint_classes_encode.view(B, N, T, J, -1).transpose(2, 3)  # (B, N, J, T, d_0)
-         
+
         # update by joint_feats_thisbatch removing the joint class dim (last dim by default)
-        if self.args.dataset_name == 'rtmpose':
+        if self.args.dataset_name == 'rtmpose2':
             joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:-1]
         else:
             joint_feats_thisbatch = joint_feats_thisbatch[:,:,:,:,:-1]
