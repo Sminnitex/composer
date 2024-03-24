@@ -122,10 +122,8 @@ class Volleyball(Dataset):
             }
         else:
             self.dataset_splits = {
-                'train': [1, 3, 6, 7, 10, 13, 15, 16, 18, 22, 23, 31, 32, 36, 38, 39,
-                          40, 41, 42, 48, 50, 52, 53, 54, 0, 2, 8, 12, 17, 19, 24, 26,
-                          27, 28, 30, 33, 46, 49, 51],
-                'test': [4, 5, 9, 11, 14, 20, 21, 25, 29, 34, 35, 37, 43, 44, 45, 47]
+                'train': [0, 1, 2, 3, 4, 5, 6, 7],
+                'test': [0, 1, 2, 3, 4, 5, 6, 7]
             }
         
         
@@ -223,14 +221,22 @@ class Volleyball(Dataset):
         """  
         annotations_thisdatasetdir = defaultdict()
         clip_joints_paths = []
+        
+        if(self.args.isvideo):
+            videopath = os.path.join(dataset_dir, 'multicam/clip')
+            cvideo = 0    
+            for file in os.listdir(videopath):
+                self.getvideo(os.path.join(videopath, file), os.path.join(os.path.dirname(videopath), str(cvideo)))
+                cvideo = cvideo + 1
+            
 
-        for annot_file in glob.glob(os.path.join(dataset_dir, 'videos/*/annotations.txt')):
+        for annot_file in glob.glob(os.path.join(dataset_dir, 'multicam/*/annotations.txt')):
             video = annot_file.split('/')[-2]
             with open(annot_file, 'r') as f:
                 lines = f.readlines()
             for l in lines:
-                clip, label = l.split()[0].split('.jpg')[0], l.split()[1]
-                annotations_thisdatasetdir[(video, clip)] = self.class2idx[label]  
+                clip = l.split()[0].split('.jpg')[0]
+                #annotations_thisdatasetdir[(video, clip)] = self.class2idx[label]  
 
         for video in self.dataset_splits[self.split]:
             clip_joints_paths.extend(glob.glob(os.path.join(dataset_dir, self.args.joints_folder_name, str(video), '*.pickle')))
@@ -785,6 +791,25 @@ class Volleyball(Dataset):
              ball_trajectory[t, 0] = self.args.image_w - ball_trajectory[t, 0]
         return ball_trajectory
             
+    def getvideo(self, videopath, output_dir):
+        cap = cv2.VideoCapture(videopath)
+        #total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        #frame_rate = cap.get(cv2.CAP_PROP_FPS)
+        #duration_sec = total_frames / frame_rate
+        duration_sec = 360
+        framecount = 0
+        
+        while cap.isOpened() | framecount < duration_sec:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_path = f"{output_dir}/frame_{framecount:04d}.jpg"
+            cv2.imwrite(frame_path, frame)
+            framecount += 3    
+            
+        cap.release()
+        print(f"Frames extracted: {framecount}")
             
     
     def __getitem__(self, index):
@@ -1024,20 +1049,7 @@ class Volleyball(Dataset):
             # (T, 6)
         else:
             ball_feats = torch.zeros(len(frames), 6)
-            
         
         assert not torch.isnan(joint_feats).any() 
         return joint_feats, label, video, clip, person_labels, ball_feats
  
- 
-class VideoTransform(transforms):
-    def __init__(self, transform=None):
-        self.transform = transform
-
-    def __call__(self, video):
-        transformed_frames = []
-        for frame in video:
-            if self.transform:
-                frame = self.transform(frame)
-            transformed_frames.append(frame)
-        return torch.stack(transformed_frames)

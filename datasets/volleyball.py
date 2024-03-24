@@ -4,11 +4,12 @@ import sys
 from pathlib import Path 
 import pickle
 import numpy as np
-import random
+import random, cv2
 import copy
 import json
 import glob
 from collections import defaultdict
+from PIL import Image
 
 import torch
 from torch.utils.data import Dataset
@@ -118,10 +119,8 @@ class Volleyball(Dataset):
             }
         else:
             self.dataset_splits = {
-                'train': [1, 3, 6, 7, 10, 13, 15, 16, 18, 22, 23, 31, 32, 36, 38, 39,
-                          40, 41, 42, 48, 50, 52, 53, 54, 0, 2, 8, 12, 17, 19, 24, 26,
-                          27, 28, 30, 33, 46, 49, 51],
-                'test': [4, 5, 9, 11, 14, 20, 21, 25, 29, 34, 35, 37, 43, 44, 45, 47]
+                'train': [1, 3, 6, 7],
+                'test': [54]
             }
         
         
@@ -220,6 +219,13 @@ class Volleyball(Dataset):
         annotations_thisdatasetdir = defaultdict()
         clip_joints_paths = []
 
+        if(self.args.isvideo):
+            videopath = os.path.join(dataset_dir, 'videos/clip')
+            cvideo = 0    
+            for file in os.listdir(videopath):
+                self.getvideo(os.path.join(videopath, file), os.path.join(os.path.dirname(videopath), str(cvideo)), 50)
+                cvideo = cvideo + 1
+                
         for annot_file in glob.glob(os.path.join(dataset_dir, 'videos/*/annotations.txt')):
             video = annot_file.split('/')[-2]
             with open(annot_file, 'r') as f:
@@ -781,7 +787,32 @@ class Volleyball(Dataset):
              ball_trajectory[t, 0] = self.args.image_w - ball_trajectory[t, 0]
         return ball_trajectory
             
-
+    def getvideo(self, videopath, output_dir, step):
+        cap = cv2.VideoCapture(videopath)
+        framecount = 0
+        keyframe = 0
+        
+        if not os.path.exists(f"{output_dir}/{keyframe:04d}"):
+            os.makedirs( f"{output_dir}/{keyframe:04d}")
+            
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_path = f"{output_dir}/{keyframe:04d}/{framecount:04d}.jpg"
+            cv2.imwrite(frame_path, frame)
+            image = Image.open(frame_path)
+            image.thumbnail([self.args.image_w, self.args.image_h])
+            image.save(frame_path, optimize=True, quality=85)
+            framecount += 1    
+            if(framecount%step == 0):
+                keyframe += step
+                if not os.path.exists(f"{output_dir}/{keyframe:04d}"):
+                    os.makedirs( f"{output_dir}/{keyframe:04d}")
+        cap.release()
+        print(f"Frames extracted: {framecount}")
+          
     def __getitem__(self, index):
         # index = 0
         current_joint_feats_path = self.clip_joints_paths[index] 
@@ -1018,7 +1049,6 @@ class Volleyball(Dataset):
         else:
             ball_feats = torch.zeros(len(frames), 6)
             
-        
         assert not torch.isnan(joint_feats).any() 
         return joint_feats, label, video, clip, person_labels, ball_feats
  
